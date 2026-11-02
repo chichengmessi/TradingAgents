@@ -114,6 +114,8 @@ def _dummy_api_keys(monkeypatch):
         # `or` not a .get default: an env var present but empty (e.g. a key left
         # blank in a .env copied from .env.example) must still get the placeholder.
         monkeypatch.setenv(env_var, os.environ.get(env_var) or "placeholder")
+    # A contributor's Nace key would send the screening and Portfolio Manager tests to Drex.
+    monkeypatch.delenv("NACE_API_KEY", raising=False)
 
 
 @pytest.fixture(autouse=True)

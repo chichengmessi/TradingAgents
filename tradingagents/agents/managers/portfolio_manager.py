@@ -6,6 +6,9 @@ Uses LangChain's ``with_structured_output`` so the LLM produces a typed
 ``final_trade_decision`` for the memory log, CLI display and saved reports.
 When a provider does not expose structured output, the agent falls back to
 free-text generation and the rating is read from that text.
+
+With ``NACE_API_KEY`` set, Drex rates the position first (see drex_rating) and
+the LLM writes the decision for that rating.
 """
 
 from __future__ import annotations
@@ -15,8 +18,9 @@ from tradingagents.agents.context import (
     get_language_instruction,
     get_portfolio_context_from_state,
 )
+from tradingagents.agents.drex_rating import drex_rating
 from tradingagents.agents.rating import parse_rating
-from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
+from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating, render_pm_decision
 from tradingagents.agents.structured import NO_EXTERNAL_TOOLS, bind_structured, invoke_structured
 
 
@@ -75,10 +79,26 @@ Write these sections, in this order, starting with the rating on its own line:
 
 {NO_EXTERNAL_TOOLS}{get_language_instruction()}"""
 
+        rating = drex_rating({
+            "instrument": instrument_context,
+            "portfolio": portfolio_context,
+            "research_plan": research_plan,
+            "trader_proposal": trader_plan,
+            "lessons": past_context,
+            "risk_debate": history,
+        })
+        if rating:
+            prompt += (
+                f"\n\nThe rating has been set from this same evidence: **{rating}**. Give it as "
+                "the Rating, and write the Executive Summary and Investment Thesis for it."
+            )
+
         # The typed rating is the decision; the rendered text only carries it.
         # Read back from text, a rating the thesis quotes could replace it.
         decision = invoke_structured(structured_llm, prompt, "Portfolio Manager")
         if decision is not None:
+            if rating:
+                decision.rating = PortfolioRating(rating)
             final_trade_decision = render_pm_decision(decision)
             final_rating = decision.rating.value
         else:

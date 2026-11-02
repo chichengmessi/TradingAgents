@@ -1,8 +1,9 @@
-"""Jev post screening, against TypeSafe's documented request and response shapes."""
+"""Post screening by Jev or Drex, against the documented System One request and response shapes."""
 
 import pytest
 import requests
 
+from tradingagents import __version__
 from tradingagents.agents import post_screen as typesafe
 
 QUESTIONS = {"is_urgent": {"type": "noul", "instructions": "Does this convey urgency?"}}
@@ -95,6 +96,62 @@ def test_a_base_url_without_a_key_does_not_turn_screening_on(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setenv("TYPESAFE_BASE_URL", "https://openrouter.ai/api")
     assert typesafe.jev_screen("AAPL") is None
+
+
+@pytest.mark.unit
+def test_a_nace_key_alone_sends_the_questions_to_drex(post, monkeypatch):
+    monkeypatch.delenv("TYPESAFE_API_KEY")
+    monkeypatch.setenv("NACE_API_KEY", "nace-test")
+    post.queue.append(_ok())
+
+    typesafe.system_one("s", QUESTIONS)
+
+    url, kwargs = post[0]
+    assert url == "https://console.nace.ai/v1/systemone"
+    assert kwargs["headers"]["Authorization"] == "Bearer nace-test"
+    assert kwargs["json"]["model"] == "drex-max-finance"
+
+
+@pytest.mark.unit
+def test_the_nace_key_wins_over_typesafes_variables(post, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://openrouter.ai/api")
+    monkeypatch.setenv("TYPESAFE_DEFAULT_MODEL", "jev-1.13.0")
+    monkeypatch.setenv("NACE_API_KEY", "nace-test")
+    monkeypatch.setenv("NACE_DEFAULT_DECISION_MODEL", "drex-max")
+    post.queue.append(_ok())
+
+    typesafe.system_one("s", QUESTIONS)
+
+    url, kwargs = post[0]
+    assert url == "https://console.nace.ai/v1/systemone"
+    assert kwargs["headers"]["Authorization"] == "Bearer nace-test"
+    assert kwargs["json"]["model"] == "drex-max"
+
+
+_DREX_CLIENT = {"X-Nace-Client": f"tradingagents/{__version__}",
+                "User-Agent": f"tradingagents/{__version__}"}
+_OPENROUTER = {"HTTP-Referer": "https://nace.ai", "X-OpenRouter-Title": "Drex for tradingagents"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("env", "attribution"), [
+    ({}, {}),
+    ({"NACE_API_KEY": "nace-test"}, _DREX_CLIENT),
+    ({"TYPESAFE_BASE_URL": "https://console.nace.ai", "TYPESAFE_DEFAULT_MODEL": "drex-max-finance"},
+     _DREX_CLIENT),
+    ({"TYPESAFE_BASE_URL": "https://openrouter.ai/api", "TYPESAFE_DEFAULT_MODEL": "nace-ai/drex-max"},
+     _DREX_CLIENT | _OPENROUTER),
+])
+def test_drex_requests_name_the_client_and_jev_requests_are_unchanged(post, monkeypatch, env,
+                                                                      attribution):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    post.queue.append(_ok())
+
+    typesafe.system_one("s", QUESTIONS)
+
+    key = env.get("NACE_API_KEY", "ts-test")
+    assert post[0][1]["headers"] == {"Authorization": f"Bearer {key}", **attribution}
 
 
 @pytest.mark.unit
@@ -249,6 +306,27 @@ def test_an_answer_missing_its_fields_reads_as_malformed(jev):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("env", [
+    {"NACE_API_KEY": "nace-test"},
+    {"TYPESAFE_BASE_URL": "https://console.nace.ai", "TYPESAFE_DEFAULT_MODEL": "drex-max-finance"},
+    {"TYPESAFE_BASE_URL": "https://openrouter.ai/api", "TYPESAFE_DEFAULT_MODEL": "nace-ai/drex-max"},
+])
+def test_the_screen_names_drex_when_drex_answers(jev, monkeypatch, env):
+    monkeypatch.delenv("TYPESAFE_API_KEY")
+    if "NACE_API_KEY" not in env:
+        monkeypatch.setenv("TYPESAFE_API_KEY", "nace-test")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    jev.update({"long NVDA": _post_answers(0.95), "b": _Response(401)})
+
+    _, note = typesafe.jev_screen("NVDA")(["long NVDA"])
+    _, failed = typesafe.jev_screen("NVDA")(["b"])
+
+    assert note.startswith("Screened by Drex: 1 of the 1 posts fetched")
+    assert failed == "<Drex screening unavailable (HTTP 401); posts are unscreened>"
+
+
+@pytest.mark.unit
 def test_the_first_failure_cancels_the_requests_not_yet_sent(jev, post, monkeypatch):
     monkeypatch.setattr(typesafe, "_WORKERS", 1)
     jev.update({"a": _Response(401), **{f"p{i}": _post_answers(0.9) for i in range(20)}})
@@ -282,6 +360,35 @@ def test_the_sentiment_analyst_hands_the_screen_to_both_social_fetchers(monkeypa
     node({"company_of_interest": "NVDA", "trade_date": "2026-01-09", "messages": []})
 
     assert seen == [screen, screen]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("nace_key", "screener"), [(None, "Jev"), ("nace-test", "Drex")])
+def test_the_sentiment_analysts_prompt_names_who_screened(monkeypatch, nace_key, screener):
+    from langchain_core.messages import AIMessage
+
+    from tradingagents.agents.analysts import sentiment_analyst
+
+    if nace_key:
+        monkeypatch.setenv("NACE_API_KEY", nace_key)
+    monkeypatch.setattr(sentiment_analyst, "jev_screen", lambda ticker: None)
+    monkeypatch.setattr(sentiment_analyst.get_news, "func", lambda *a: "news")
+    for name in ("fetch_stocktwits_messages", "fetch_reddit_posts"):
+        monkeypatch.setattr(sentiment_analyst, name, lambda *a, **k: "")
+    prompts = []
+
+    class _LLM:
+        def with_structured_output(self, *a, **k):
+            raise NotImplementedError
+
+        def invoke(self, messages):
+            prompts.append(messages[0].content)
+            return AIMessage(content="report")
+
+    sentiment_analyst.create_sentiment_analyst(_LLM())(
+        {"company_of_interest": "NVDA", "trade_date": "2026-01-09", "messages": []})
+
+    assert f'A block headed "Screened by {screener}" has had' in prompts[0]
 
 
 @pytest.mark.unit

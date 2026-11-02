@@ -7,8 +7,8 @@ prompt, so the model reports on data it was given rather than inventing posts:
   2. StockTwits messages: the cashtag stream, with Bullish/Bearish tags
   3. Reddit posts: r/wallstreetbets, r/stocks, r/investing, or crypto communities for a crypto pair
 
-Each source is trimmed to the analysis window. With a TypeSafe key, the social
-posts are screened by Jev first (see post_screen). These feeds serve recent items
+Each source is trimmed to the analysis window. With a Nace or TypeSafe key, the
+social posts are screened by Drex or Jev first (see post_screen). These feeds serve recent items
 and are not archived, so a historical run's sentiment inputs are not
 point-in-time.
 
@@ -23,7 +23,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
-from tradingagents.agents.post_screen import jev_screen
+from tradingagents.agents.post_screen import jev_screen, provider
 from tradingagents.agents.schemas import SentimentReport, render_sentiment_report
 from tradingagents.agents.structured import (
     NO_EXTERNAL_TOOLS,
@@ -83,6 +83,7 @@ def create_sentiment_analyst(llm):
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
             subreddits=subreddits,
+            screener=provider()[3],
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -136,6 +137,7 @@ def _build_system_message(
     stocktwits_block: str,
     reddit_block: str,
     subreddits: tuple[str, ...] = DEFAULT_SUBREDDITS,
+    screener: str = "Jev",
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
     if subreddits == DEFAULT_SUBREDDITS:
@@ -171,7 +173,7 @@ Community discussion, without vote or comment counts. Subreddit character matter
 
 ## How to analyze this data (best practices)
 
-1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone. A block headed "Screened by Jev" has had off-topic posts removed; its stance count is a classifier's read of every on-topic post fetched, labelled or not, of which the posts listed are a sample. Read it alongside the user tags.
+1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone. A block headed "Screened by {screener}" has had off-topic posts removed; its stance count is a classifier's read of every on-topic post fetched, labelled or not, of which the posts listed are a sample. Read it alongside the user tags.
 
 2. **Look for cross-source divergences.** If news framing is bearish but StockTwits is overwhelmingly bullish, that mismatch is itself a signal — it can mean retail is leaning into a thesis the news flow hasn't caught up to (or vice versa, that retail is chasing while institutions are cautious).
 
